@@ -1,0 +1,1466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Ledger</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#14170F" />
+<link rel="icon" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-192.png" />
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #14170F; color: #EFEAD8; font-family: 'IBM Plex Sans', sans-serif; }
+  .lw-input, .lw-select { background: #262B20; border: 1px solid #343A2C; color: #EFEAD8; border-radius: 6px; padding: 10px 12px; font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; width: 100%; }
+  .lw-input:focus, .lw-select:focus { outline: none; border-color: #3AA184; }
+  .lw-input::placeholder { color: #9A9784; }
+  .lw-btn { cursor: pointer; border: none; font-family: 'IBM Plex Sans', sans-serif; }
+  .lw-row:hover { background: #262B20; }
+  .lw-tab::-webkit-scrollbar { display: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo } = React;
+
+const INK = '#14170F', SURFACE = '#1D2117', SURFACE_2 = '#262B20', PAPER = '#EFEAD8';
+const MUTED = '#9A9784', DIVIDER = '#343A2C', TEAL = '#3AA184', RUST = '#CF5E42', AMBER = '#D9A441';
+const STORAGE_KEY = 'ledger:data:v1';
+const CURRENCIES = ['PKR', 'USD', 'EUR', 'GBP', 'INR', 'AED', 'JPY', 'CAD', 'AUD'];
+const EXPENSE_CATS = ['Home', 'Food & Groceries', 'Transport', 'Bills & Utilities', 'Health', 'Entertainment', 'Shopping', 'Education', 'Travel', 'Insurance', 'Subscriptions', 'Other'];
+const INCOME_CATS = ['Salary', 'Freelance', 'Business', 'Investments', 'Gift', 'Refund', 'Other'];
+const DEFAULT_CATEGORIES = [
+  ...EXPENSE_CATS.map((name) => ({ id: 'exp-' + name, name, type: 'expense' })),
+  ...INCOME_CATS.map((name) => ({ id: 'inc-' + name, name, type: 'income' })),
+];
+const ACCOUNT_TYPES = [
+  { id: 'cash', label: 'Cash' }, { id: 'bank', label: 'Bank account' }, { id: 'savings', label: 'Savings' },
+  { id: 'card', label: 'Credit card' }, { id: 'ewallet', label: 'E-wallet' },
+];
+const ASSET_TYPES = [
+  { id: 'stock', label: 'Stocks / investments' }, { id: 'crypto', label: 'Crypto' },
+  { id: 'property', label: 'Property' }, { id: 'other', label: 'Other asset' },
+];
+const PALETTE = [TEAL, RUST, AMBER, '#7F77DD', '#D4537E', '#378ADD', '#888780'];
+
+function uid() { return String(Date.now()) + Math.random().toString(36).slice(2, 7); }
+function fmt(n) {
+  const v = Math.round((n + Number.EPSILON) * 100) / 100;
+  return v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function monthKey(d) { return d.slice(0, 7); }
+function monthLabel(key) {
+  const [y, m] = key.split('-');
+  return new Date(Number(y), Number(m) - 1, 1).toLocaleString('default', { month: 'long', year: 'numeric' });
+}
+function daysBetween(a, b) { return Math.round((new Date(b) - new Date(a)) / 86400000); }
+function advanceDate(d, freq) {
+  const dt = new Date(d);
+  if (freq === 'weekly') dt.setDate(dt.getDate() + 7);
+  else if (freq === 'yearly') dt.setFullYear(dt.getFullYear() + 1);
+  else dt.setMonth(dt.getMonth() + 1);
+  return dt.toISOString().slice(0, 10);
+}
+function periodStart(period, customDays) {
+  const now = new Date();
+  if (period === 'weekly') { const d = new Date(now); d.setDate(d.getDate() - d.getDay()); return d.toISOString().slice(0, 10); }
+  if (period === 'custom') { const d = new Date(now); d.setDate(d.getDate() - (customDays || 30)); return d.toISOString().slice(0, 10); }
+  return now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-01';
+}
+function prevMonthKey(monthKey) {
+  const [y, m] = monthKey.split('-').map(Number);
+  const d = new Date(y, m - 2, 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+function monthRange(monthKey) {
+  return [monthKey + '-01', monthKey + '-31'];
+}
+function monthEnd(mk) {
+  const [y, m] = mk.split('-').map(Number);
+  return mk + '-' + String(new Date(y, m, 0).getDate()).padStart(2, '0');
+}
+function nextMonthKey(mk) {
+  const [y, m] = mk.split('-').map(Number);
+  const d = new Date(y, m, 1);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0');
+}
+function round2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch (e) {}
+  return null;
+}
+function saveData(d) {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch (e) { console.error('save failed', e); }
+}
+function csvEscape(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function parseCSV(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
+  if (lines.length < 2) return [];
+  const headers = lines[0].split(',').map((h) => h.trim().replace(/^"|"$/g, ''));
+  return lines.slice(1).map((line) => {
+    const cells = line.match(/(".*?"|[^,]+)(?=,|$)/g) || [];
+    const row = {};
+    headers.forEach((h, i) => { row[h] = (cells[i] || '').trim().replace(/^"|"$/g, '').replace(/""/g, '"'); });
+    return row;
+  });
+}
+
+function Icon({ path, size = 18, color = 'currentColor', style }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={style}>
+      <path d={path} />
+    </svg>
+  );
+}
+const P = {
+  plus: 'M5 12h14M12 5v14', trash: 'M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z',
+  x: 'M18 6 6 18M6 6l12 12', check: 'M20 6 9 17l-5-5', up: 'M7 17 17 7M7 7h10v10', down: 'M7 7l10 10M17 7v10H7',
+  alert: 'M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01',
+  wallet: 'M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h14a2 2 0 0 1 2 2v3m0 0h-4a2 2 0 0 0 0 4h4a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1zM3 5v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-3',
+  download: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3', upload: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12',
+  pencil: 'M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z',
+  swap: 'M7 20V5M7 5 4 8M7 5l3 3M17 4v15M17 19l3-3M17 19l-3-3',
+};
+
+function Badge({ name, color }) {
+  return (
+    <div style={{ width: 30, height: 30, borderRadius: 8, background: SURFACE_2, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, color, fontSize: 13, fontWeight: 500 }}>
+      {(name || '?').charAt(0).toUpperCase()}
+    </div>
+  );
+}
+
+function Modal({ onClose, title, children, wide }) {
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16, zIndex: 50 }}>
+      <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 10, padding: 20, width: '100%', maxWidth: wide ? 460 : 380, maxHeight: '86vh', overflowY: 'auto' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+          <h3 style={{ fontFamily: "'Fraunces', serif", fontSize: 17, fontWeight: 600, margin: 0 }}>{title}</h3>
+          <button onClick={onClose} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.x} size={18} /></button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+function TypeToggle({ value, onChange, option, label, color }) {
+  const active = value === option;
+  return (
+    <button type="button" onClick={() => onChange(option)} className="lw-btn" style={{
+      flex: 1, padding: '8px 0', borderRadius: 6, background: active ? color : SURFACE_2,
+      color: active ? INK : MUTED, border: '1px solid ' + (active ? color : DIVIDER), fontWeight: 500, fontSize: 13,
+    }}>{label}</button>
+  );
+}
+function SectionHeader({ title, action, onAction }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+      <h2 style={{ fontFamily: "'Fraunces', serif", fontSize: 17, fontWeight: 600, margin: 0 }}>{title}</h2>
+      {action && <button onClick={onAction} className="lw-btn" style={{ background: 'transparent', color: TEAL, fontSize: 13, border: 'none' }}>{action}</button>}
+    </div>
+  );
+}
+function GoalBar({ b, currency, ctx, onDelete, onEdit, compact }) {
+  const over = b.remaining < 0;
+  const barColor = over ? RUST : b.pct >= (b.alertPct || 80) ? AMBER : TEAL;
+  const hasRollover = b.period === 'monthly' && b.carry !== 0 && !isNaN(b.carry);
+  const basePct = hasRollover ? Math.max(0, Math.min(100, (b.limit / b.available) * 100)) : 100;
+  const [adjusting, setAdjusting] = useState(false);
+  const [overrideVal, setOverrideVal] = useState(String(Math.round((b.carry || 0) * 100) / 100));
+  return (
+    <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '12px 14px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 14 }}>
+        <span style={{ fontWeight: 500 }}>{b.name}</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          {b.pct >= (b.alertPct || 80) && <Icon path={P.alert} size={13} color={over ? RUST : AMBER} />}
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", color: over ? RUST : PAPER }}>
+            {over ? 'Over by ' + currency + ' ' + fmt(Math.abs(b.remaining)) : currency + ' ' + fmt(b.remaining) + ' left'}
+          </span>
+          {onEdit && <button onClick={onEdit} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.pencil} size={13} /></button>}
+          {onDelete && <button onClick={onDelete} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.trash} size={14} /></button>}
+        </div>
+      </div>
+
+      {hasRollover && (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ height: 6, borderRadius: 3, overflow: 'hidden', display: 'flex' }}>
+            <div style={{ width: basePct + '%', background: SURFACE_2, borderRight: '2px solid ' + INK }} title={'Base ' + fmt(b.limit)} />
+            <div style={{ width: (100 - basePct) + '%', background: b.carry > 0 ? '#7F77DD' : RUST }} title={'Rollover ' + fmt(b.carry)} />
+          </div>
+          <p style={{ fontSize: 11, color: MUTED, margin: '4px 0 0' }}>
+            Base {currency} {fmt(b.limit)} {b.carry >= 0 ? '+ rolled over ' + currency + ' ' + fmt(b.carry) : '− overspent last month ' + currency + ' ' + fmt(Math.abs(b.carry))} = {currency} {fmt(b.available)} available
+          </p>
+        </div>
+      )}
+
+      <div style={{ height: 6, borderRadius: 3, background: DIVIDER, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: Math.max(0, b.pct) + '%', background: barColor, borderRadius: 3 }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11, color: MUTED }}>
+        <span>Spent {currency} {fmt(b.spent)}</span>
+        <span>{b.period === 'monthly' ? 'Monthly' : b.period === 'weekly' ? 'Weekly' : 'Every ' + (b.customDays || 30) + 'd'} goal {currency} {fmt(b.limit)}</span>
+      </div>
+
+      {!compact && b.period === 'monthly' && ctx && (
+        <div style={{ marginTop: 8 }}>
+          {!adjusting ? (
+            <button onClick={() => setAdjusting(true)} className="lw-btn" style={{ background: 'transparent', color: TEAL, fontSize: 11, border: 'none', padding: 0 }}>Adjust this month's rollover</button>
+          ) : (
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input className="lw-input" type="number" step="0.01" value={overrideVal} onChange={(e) => setOverrideVal(e.target.value)} style={{ width: 110 }} />
+              <button onClick={() => { ctx.setGoalCarryOverride(b.id, ctx.thisMonth, parseFloat(overrideVal) || 0); setAdjusting(false); }} className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '6px 10px', fontSize: 12 }}>Save</button>
+              <button onClick={() => setAdjusting(false)} className="lw-btn" style={{ background: 'transparent', color: MUTED, fontSize: 12 }}>Cancel</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+function TxnList({ txns, ctx, limit }) {
+  const rows = limit ? txns.slice(0, limit) : txns;
+  if (rows.length === 0) return <p style={{ color: MUTED, fontSize: 13 }}>Nothing here yet.</p>;
+  return (
+    <div style={{ border: '1px solid ' + DIVIDER, borderRadius: 8, overflow: 'hidden' }}>
+      {rows.map((t, i) => {
+        const cat = ctx.categoryById(t.categoryId);
+        const acc = ctx.accountById(t.accountId);
+        const isTransfer = !!t.transfer;
+        return (
+          <div key={t.id} className="lw-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderTop: i === 0 ? 'none' : '1px solid ' + DIVIDER }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+              <Badge name={isTransfer ? 'Transfer' : (cat && cat.name)} color={isTransfer ? MUTED : (t.type === 'income' ? TEAL : RUST)} />
+              <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                <span style={{ fontSize: 14, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{isTransfer ? 'Transfer' : ((cat && cat.name) || 'Uncategorized')}{t.note ? ' · ' + t.note : ''}</span>
+                <span style={{ fontSize: 11, color: MUTED }}>{t.date} · {(acc && acc.name) || '—'}</span>
+              </div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, color: isTransfer ? MUTED : (t.type === 'income' ? TEAL : RUST) }}>
+                {t.type === 'income' ? '+' : '−'}{(acc && acc.currency) || ''} {fmt(t.amount)}
+              </span>
+              {!isTransfer && <button onClick={() => ctx.openTxnForm(t)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.pencil} size={13} /></button>}
+              <button onClick={() => ctx.deleteTransaction(t.id)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.trash} size={14} /></button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DashboardTab({ ctx }) {
+  const { displayCurrency, netWorth, monthIncome, monthExpense, budgetRows, sortedTxns, upcomingBills, loans, convert, loanRemaining, sweepRows } = ctx;
+  const pendingSweeps = sweepRows.filter((r) => r.balance > 0);
+  const dueSoon = upcomingBills.filter((b) => daysBetween(todayStr(), b.nextDate) <= 3);
+  const totalOwed = loans.filter((l) => l.direction === 'owed').reduce((s, l) => s + convert(loanRemaining(l), l.currency), 0);
+  const totalOwe = loans.filter((l) => l.direction === 'owe').reduce((s, l) => s + convert(loanRemaining(l), l.currency), 0);
+  return (
+    <React.Fragment>
+      <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 10, padding: '22px 24px', marginBottom: 20, backgroundImage: 'repeating-linear-gradient(to bottom, transparent 0, transparent 27px, ' + DIVIDER + ' 27px, ' + DIVIDER + ' 28px)' }}>
+        <p style={{ color: MUTED, fontSize: 12, letterSpacing: 1, textTransform: 'uppercase', margin: 0 }}>Net worth</p>
+        <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 38, fontWeight: 500, margin: '4px 0 18px', color: netWorth >= 0 ? PAPER : RUST }}>{displayCurrency} {fmt(netWorth)}</p>
+        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon path={P.up} size={16} color={TEAL} />
+            <div><p style={{ margin: 0, fontSize: 11, color: MUTED }}>Income this month</p><p style={{ margin: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, color: TEAL }}>{displayCurrency} {fmt(monthIncome)}</p></div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Icon path={P.down} size={16} color={RUST} />
+            <div><p style={{ margin: 0, fontSize: 11, color: MUTED }}>Expenses this month</p><p style={{ margin: 0, fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, color: RUST }}>{displayCurrency} {fmt(monthExpense)}</p></div>
+          </div>
+        </div>
+      </div>
+      {pendingSweeps.length > 0 && (
+        <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '10px 14px', marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <Icon path={P.swap} size={15} color={TEAL} />
+            <span style={{ fontSize: 11, color: MUTED, letterSpacing: 1, textTransform: 'uppercase' }}>Moves to savings on the 1st</span>
+          </div>
+          {pendingSweeps.map((r) => (
+            <div key={r.acc.id} style={{ display: 'flex', justifyContent: 'space-between', gap: 10, fontSize: 13, padding: '2px 0' }}>
+              <span style={{ color: MUTED, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.acc.name} → {r.target ? r.target.name : 'missing account'}</span>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", flexShrink: 0 }}>{r.acc.currency} {fmt(r.balance)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {(totalOwed > 0 || totalOwe > 0) && (
+        <div style={{ display: 'flex', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
+          {totalOwed > 0 && <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '10px 14px', flex: 1, minWidth: 140 }}><span style={{ fontSize: 11, color: MUTED }}>You'll receive</span><p style={{ margin: '2px 0 0', fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, color: TEAL }}>{displayCurrency} {fmt(totalOwed)}</p></div>}
+          {totalOwe > 0 && <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '10px 14px', flex: 1, minWidth: 140 }}><span style={{ fontSize: 11, color: MUTED }}>You owe</span><p style={{ margin: '2px 0 0', fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, color: RUST }}>{displayCurrency} {fmt(totalOwe)}</p></div>}
+        </div>
+      )}
+      {dueSoon.length > 0 && (
+        <div style={{ background: SURFACE_2, border: '1px solid ' + AMBER, borderRadius: 8, padding: '10px 14px', marginBottom: 20, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Icon path={P.alert} size={15} color={AMBER} />
+          <span style={{ fontSize: 13 }}>{dueSoon.length} bill{dueSoon.length > 1 ? 's' : ''} due within 3 days — check the Bills tab.</span>
+        </div>
+      )}
+      <SectionHeader title="Budget goals" />
+      {budgetRows.length === 0 ? <p style={{ color: MUTED, fontSize: 13, marginBottom: 24 }}>No budget goals yet — head to the Budgets tab to set one.</p> : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+          {budgetRows.map((b) => <GoalBar key={b.id} b={b} currency={displayCurrency} compact />)}
+        </div>
+      )}
+      <SectionHeader title="Recent activity" />
+      <TxnList txns={sortedTxns} ctx={ctx} limit={6} />
+    </React.Fragment>
+  );
+}
+
+function TransactionsTab({ ctx }) {
+  return (
+    <div>
+      <SectionHeader title="All transactions" />
+      <div style={{ display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' }}>
+        <button onClick={() => ctx.openTxnForm()} className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '7px 14px', fontSize: 13, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon path={P.plus} size={13} />Add</button>
+        <button onClick={ctx.exportCSV} className="lw-btn" style={{ background: SURFACE_2, color: PAPER, border: '1px solid ' + DIVIDER, borderRadius: 6, padding: '7px 14px', fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon path={P.download} size={13} />Export CSV</button>
+        <label className="lw-btn" style={{ background: SURFACE_2, color: PAPER, border: '1px solid ' + DIVIDER, borderRadius: 6, padding: '7px 14px', fontSize: 13, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <Icon path={P.upload} size={13} />Import CSV
+          <input type="file" accept=".csv" style={{ display: 'none' }} onChange={(e) => e.target.files[0] && ctx.importCSV(e.target.files[0])} />
+        </label>
+      </div>
+      <TxnList txns={ctx.sortedTxns} ctx={ctx} />
+    </div>
+  );
+}
+function BudgetsTab({ ctx }) {
+  return (
+    <div>
+      <SectionHeader title="Budget goals" action="+ Add goal" onAction={() => ctx.openGoalForm()} />
+      {ctx.budgetRows.length === 0 ? (
+        <div style={{ background: SURFACE, border: '1px dashed ' + DIVIDER, borderRadius: 8, padding: 20, textAlign: 'center' }}>
+          <p style={{ color: MUTED, fontSize: 13, margin: '0 0 10px' }}>Set a spending limit for one category or a group of them.</p>
+          <button onClick={() => ctx.openGoalForm()} className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '8px 16px', fontSize: 13, fontWeight: 500 }}>Set a goal</button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {ctx.budgetRows.map((b) => <GoalBar key={b.id} b={b} currency={ctx.displayCurrency} ctx={ctx} onEdit={() => ctx.openGoalForm(b)} onDelete={() => ctx.deleteGoal(b.id)} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+function BillsTab({ ctx }) {
+  return (
+    <div>
+      <SectionHeader title="Planned bills & subscriptions" action="+ Add bill" onAction={() => ctx.openBillForm()} />
+      {ctx.upcomingBills.length === 0 ? <p style={{ color: MUTED, fontSize: 13 }}>No recurring bills yet. Add rent, subscriptions, or anything that repeats.</p> : (
+        <div style={{ border: '1px solid ' + DIVIDER, borderRadius: 8, overflow: 'hidden' }}>
+          {ctx.upcomingBills.map((b, i) => {
+            const dd = daysBetween(todayStr(), b.nextDate);
+            const overdue = dd < 0, dueSoon = dd >= 0 && dd <= 3;
+            const acc = ctx.accountById(b.accountId);
+            return (
+              <div key={b.id} className="lw-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 14px', borderTop: i === 0 ? 'none' : '1px solid ' + DIVIDER, flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 500 }}>{b.name}</div>
+                  <div style={{ fontSize: 11, color: overdue ? RUST : dueSoon ? AMBER : MUTED }}>
+                    {overdue ? 'Overdue by ' + (-dd) + 'd' : dd === 0 ? 'Due today' : 'Due in ' + dd + 'd'} · {b.nextDate} · repeats {b.frequency}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, color: b.type === 'income' ? TEAL : RUST }}>{acc && acc.currency} {fmt(b.amount)}</span>
+                  <button onClick={() => ctx.markBillPaid(b)} className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '5px 10px', fontSize: 12, fontWeight: 500, display: 'inline-flex', alignItems: 'center', gap: 4 }}><Icon path={P.check} size={12} />Mark paid</button>
+                  <button onClick={() => ctx.openBillForm(b)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.pencil} size={13} /></button>
+                  <button onClick={() => ctx.deleteBill(b.id)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.trash} size={14} /></button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+function ReportsTab({ ctx }) {
+  const { transactions, categoryById, accountById, thisMonth, displayCurrency, convert, accounts, assets } = ctx;
+  const pieData = useMemo(() => {
+    const byCat = {};
+    transactions.filter((t) => t.type === 'expense' && !t.transfer && monthKey(t.date) === thisMonth).forEach((t) => {
+      const cat = categoryById(t.categoryId);
+      const name = (cat && cat.name) || 'Other';
+      const acc = accountById(t.accountId);
+      byCat[name] = (byCat[name] || 0) + convert(t.amount, acc ? acc.currency : displayCurrency);
+    });
+    const total = Object.values(byCat).reduce((s, v) => s + v, 0);
+    return Object.entries(byCat).map(([name, value]) => ({ name, value, pct: total ? (value / total) * 100 : 0 }));
+  }, [transactions, thisMonth]);
+
+  const trendData = useMemo(() => {
+    const months = [];
+    const now = new Date();
+    for (let i = 5; i >= 0; i--) { const d = new Date(now.getFullYear(), now.getMonth() - i, 1); months.push(d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')); }
+    return months.map((mk) => {
+      const txns = transactions.filter((t) => monthKey(t.date) === mk && !t.transfer);
+      const income = txns.filter((t) => t.type === 'income').reduce((s, t) => { const acc = accountById(t.accountId); return s + convert(t.amount, acc ? acc.currency : displayCurrency); }, 0);
+      const expense = txns.filter((t) => t.type === 'expense').reduce((s, t) => { const acc = accountById(t.accountId); return s + convert(t.amount, acc ? acc.currency : displayCurrency); }, 0);
+      return { month: mk.slice(5), income, expense };
+    });
+  }, [transactions]);
+  const maxVal = Math.max(1, ...trendData.map((d) => Math.max(d.income, d.expense)));
+
+  let gradientStops = [];
+  let acc0 = 0;
+  pieData.forEach((d, i) => {
+    const start = acc0, end = acc0 + d.pct;
+    gradientStops.push(PALETTE[i % PALETTE.length] + ' ' + start + '% ' + end + '%');
+    acc0 = end;
+  });
+  const gradient = gradientStops.length ? 'conic-gradient(' + gradientStops.join(', ') + ')' : DIVIDER;
+
+  return (
+    <div>
+      <SectionHeader title="Spending by category — this month" />
+      {pieData.length === 0 ? <p style={{ color: MUTED, fontSize: 13, marginBottom: 24 }}>No expenses recorded this month yet.</p> : (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 24, marginBottom: 28, flexWrap: 'wrap' }}>
+          <div style={{ width: 160, height: 160, borderRadius: '50%', background: gradient, flexShrink: 0 }} />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {pieData.map((d, i) => (
+              <div key={d.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                <span style={{ width: 10, height: 10, borderRadius: 3, background: PALETTE[i % PALETTE.length], display: 'inline-block' }} />
+                <span>{d.name}</span>
+                <span style={{ color: MUTED, fontFamily: "'IBM Plex Mono', monospace" }}>{displayCurrency} {fmt(d.value)} ({Math.round(d.pct)}%)</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <SectionHeader title="Income vs expenses — last 6 months" />
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 14, height: 160, marginBottom: 10, padding: '0 4px' }}>
+        {trendData.map((d) => (
+          <div key={d.month} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: 1, gap: 4 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, height: 130 }}>
+              <div title={'Income ' + fmt(d.income)} style={{ width: 12, height: Math.max(2, (d.income / maxVal) * 130), background: TEAL, borderRadius: '2px 2px 0 0' }} />
+              <div title={'Expense ' + fmt(d.expense)} style={{ width: 12, height: Math.max(2, (d.expense / maxVal) * 130), background: RUST, borderRadius: '2px 2px 0 0' }} />
+            </div>
+            <span style={{ fontSize: 11, color: MUTED }}>{d.month}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 16, fontSize: 12, color: MUTED, marginBottom: 28 }}>
+        <span><span style={{ width: 10, height: 10, background: TEAL, display: 'inline-block', borderRadius: 3, marginRight: 4, verticalAlign: -1 }} />Income</span>
+        <span><span style={{ width: 10, height: 10, background: RUST, display: 'inline-block', borderRadius: 3, marginRight: 4, verticalAlign: -1 }} />Expense</span>
+      </div>
+
+      <SectionHeader title="Net worth composition" />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {accounts.map((a) => (
+          <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderBottom: '1px solid ' + DIVIDER }}>
+            <span>{a.name}</span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{displayCurrency} {fmt(convert(ctx.accountBalance(a), a.currency))}</span>
+          </div>
+        ))}
+        {assets.map((a) => (
+          <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderBottom: '1px solid ' + DIVIDER }}>
+            <span>{a.name} <span style={{ color: MUTED }}>(asset)</span></span><span style={{ fontFamily: "'IBM Plex Mono', monospace" }}>{displayCurrency} {fmt(convert(a.value, a.currency))}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function SyncTab({ ctx }) {
+  const [url, setUrl] = useState(ctx.sheetUrl);
+  return (
+    <div>
+      <SectionHeader title="Sync with Google Sheets" />
+      <p style={{ color: MUTED, fontSize: 13, marginBottom: 14 }}>
+        Paste the Apps Script Web App URL from your Google Sheet. <b>Pull</b> loads whatever's saved there onto this device.
+        <b> Push</b> saves this device's data there, overwriting what's in the sheet. Do this on each device to keep them in sync.
+      </p>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+        <input className="lw-input" placeholder="https://script.google.com/macros/s/.../exec" value={url} onChange={(e) => setUrl(e.target.value)} style={{ flex: 1, minWidth: 220 }} />
+        <button onClick={() => ctx.updateSheetUrl(url)} className="lw-btn" style={{ background: SURFACE_2, color: PAPER, border: '1px solid ' + DIVIDER, borderRadius: 6, padding: '10px 14px', fontSize: 13 }}>Save URL</button>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+        <button onClick={ctx.pullFromSheet} className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '9px 16px', fontSize: 13, fontWeight: 500, flex: 1 }}>Pull from sheet</button>
+        <button onClick={ctx.pushToSheet} className="lw-btn" style={{ background: SURFACE_2, color: PAPER, border: '1px solid ' + DIVIDER, borderRadius: 6, padding: '9px 16px', fontSize: 13, flex: 1 }}>Push to sheet</button>
+      </div>
+      {ctx.syncStatus && <p style={{ color: MUTED, fontSize: 12 }}>{ctx.syncStatus}</p>}
+      <p style={{ color: MUTED, fontSize: 11, marginTop: 20 }}>Keep this URL private — anyone who has it can read or overwrite your data.</p>
+    </div>
+  );
+}
+
+function AccountsTab({ ctx }) {
+  const { accounts, assets, categories, displayCurrency, rates, sweepRows } = ctx;
+  const [sweepMsg, setSweepMsg] = useState('');
+  const nextFirst = nextMonthKey(ctx.thisMonth) + '-01';
+  const currenciesUsed = Array.from(new Set([...accounts.map((a) => a.currency), ...assets.map((a) => a.currency), displayCurrency]));
+  return (
+    <div>
+      <SectionHeader title="Accounts" action="+ Add account" onAction={() => ctx.openAccountForm()} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+        {accounts.map((a) => (
+          <div key={a.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '10px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Badge name={a.name} color={TEAL} />
+              <div><div style={{ fontSize: 14 }}>{a.name}</div><div style={{ fontSize: 11, color: MUTED }}>{a.currency}{a.sweepEnabled && a.sweepTargetId ? ' · resets on the 1st → ' + ((ctx.accountById(a.sweepTargetId) || {}).name || 'missing account') : ''}</div></div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14 }}>{a.currency} {fmt(ctx.accountBalance(a))}</span>
+              <button onClick={() => ctx.openAccountForm(a)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.pencil} size={13} /></button>
+              <button onClick={() => ctx.deleteAccount(a.id)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.trash} size={14} /></button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <SectionHeader title="Month-end reset" />
+      <p style={{ color: MUTED, fontSize: 12, marginTop: -4, marginBottom: 10 }}>
+        An account set to reset monthly hands whatever is left in it to a savings account on the 1st, so the new month starts at 0. Nothing is lost — the money just sits in savings, and the balances above still show everything you have.
+      </p>
+      {sweepRows.length === 0 ? (
+        <p style={{ color: MUTED, fontSize: 13, marginBottom: 24 }}>No account resets yet — edit an account above and tick “Reset monthly”.</p>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+          {sweepRows.map((r) => (
+            <div key={r.acc.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '10px 14px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                <Icon path={P.swap} size={15} color={TEAL} />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.acc.name} → {r.target ? r.target.name : 'missing account'}</div>
+                  <div style={{ fontSize: 11, color: MUTED }}>{!r.target ? 'pick a savings account again' : r.balance > 0 ? 'moves on ' + nextFirst : 'nothing left to move'}</div>
+                </div>
+              </div>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14, flexShrink: 0 }}>{r.acc.currency} {fmt(r.balance)}</span>
+            </div>
+          ))}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <button onClick={() => { const n = ctx.runSweepNow(); setSweepMsg(n ? 'Moved ' + n + ' account' + (n > 1 ? 's' : '') + ' into savings.' : 'Nothing left to move.'); }} className="lw-btn" style={{ background: 'transparent', color: TEAL, border: '1px solid ' + DIVIDER, borderRadius: 6, padding: '8px 14px', fontSize: 13 }}>Close the month now</button>
+            {sweepMsg && <span style={{ fontSize: 12, color: MUTED }}>{sweepMsg}</span>}
+          </div>
+        </div>
+      )}
+      <SectionHeader title="Investments & other assets" action="+ Add asset" onAction={() => ctx.openAssetForm()} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+        {assets.length === 0 && <p style={{ color: MUTED, fontSize: 13 }}>Track stocks, crypto, property, or anything else that adds to your net worth.</p>}
+        {assets.map((a) => (
+          <div key={a.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '10px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <Badge name={a.name} color={AMBER} />
+              <div style={{ fontSize: 14 }}>{a.name}</div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 14 }}>{a.currency} {fmt(a.value)}</span>
+              <button onClick={() => ctx.openAssetForm(a)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.pencil} size={13} /></button>
+              <button onClick={() => ctx.deleteAsset(a.id)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.trash} size={14} /></button>
+            </div>
+          </div>
+        ))}
+      </div>
+      <SectionHeader title="Categories" action="+ Add category" onAction={() => ctx.openCategoryForm()} />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 24 }}>
+        {categories.map((c) => (
+          <span key={c.id} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, background: SURFACE_2, border: '1px solid ' + DIVIDER, borderRadius: 20, padding: '4px 10px', fontSize: 12 }}>
+            <button onClick={() => ctx.openCategoryForm(c)} className="lw-btn" style={{ background: 'transparent', color: PAPER, padding: 0 }}>{c.name} <span style={{ color: MUTED }}>({c.type})</span></button>
+            <button onClick={() => ctx.deleteCategory(c.id)} className="lw-btn" style={{ background: 'transparent', color: MUTED, padding: 0 }}><Icon path={P.x} size={11} /></button>
+          </span>
+        ))}
+      </div>
+      <SectionHeader title="Exchange rates" />
+      <p style={{ color: MUTED, fontSize: 12, marginTop: -4, marginBottom: 10 }}>Set how many units of each currency equal 1 {displayCurrency} (your display currency), so totals convert correctly.</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {currenciesUsed.filter((c) => c !== displayCurrency).map((c) => (
+          <div key={c} style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 13, width: 90 }}>1 {displayCurrency} =</span>
+            <input className="lw-input" type="number" step="0.0001" value={rates[c] != null ? rates[c] : 1} onChange={(e) => ctx.saveRate(c, parseFloat(e.target.value) || 1)} style={{ width: 120 }} />
+            <span style={{ fontSize: 13, color: MUTED }}>{c}</span>
+          </div>
+        ))}
+        {currenciesUsed.filter((c) => c !== displayCurrency).length === 0 && <p style={{ color: MUTED, fontSize: 13 }}>All your accounts use {displayCurrency} — nothing to convert yet.</p>}
+      </div>
+    </div>
+  );
+}
+
+function QuickAddCategory({ ctx, type, onAdd }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  if (!open) return <button type="button" onClick={() => setOpen(true)} className="lw-btn" style={{ background: 'transparent', color: TEAL, fontSize: 12, border: 'none', alignSelf: 'flex-start', padding: 0 }}>+ new category</button>;
+  return (
+    <div style={{ display: 'flex', gap: 6 }}>
+      <input className="lw-input" placeholder="New category name" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
+      <button type="button" onClick={() => { if (!name.trim()) return; const id = ctx.saveCategory({ name: name.trim(), type }); onAdd(id); setName(''); setOpen(false); }} className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '0 14px', fontSize: 13, fontWeight: 500 }}>Add</button>
+    </div>
+  );
+}
+
+function TxnModal({ ctx, onClose, initial }) {
+  const editing = !!initial;
+  const [type, setType] = useState((initial && initial.type) || 'expense');
+  const [amount, setAmount] = useState(initial ? String(initial.amount) : '');
+  const [accountId, setAccountId] = useState((initial && initial.accountId) || (ctx.accounts[0] && ctx.accounts[0].id) || '');
+  const [categoryId, setCategoryId] = useState((initial && initial.categoryId) || '');
+  const [note, setNote] = useState((initial && initial.note) || '');
+  const [date, setDate] = useState((initial && initial.date) || todayStr());
+  const [toId, setToId] = useState('');
+  const filteredCats = ctx.categories.filter((c) => c.type === type);
+  const isTransfer = type === 'transfer';
+  const from = ctx.accountById(accountId);
+  const to = ctx.accountById(toId);
+  const transferTargets = ctx.accounts.filter((a) => a.id !== accountId);
+  const amt = parseFloat(amount);
+  const converted = (isTransfer && from && to && from.currency !== to.currency && amt > 0)
+    ? round2(ctx.crossConvert(amt, from.currency, to.currency)) : null;
+  function submit(e) {
+    e.preventDefault();
+    if (!amt || amt <= 0 || !accountId) return;
+    if (isTransfer) {
+      if (!toId || toId === accountId) return;
+      ctx.addTransfer({ fromId: accountId, toId, amount: amt, note: note.trim(), date });
+      onClose();
+      return;
+    }
+    if (!categoryId) return;
+    const data = { type, amount: amt, accountId, categoryId, note: note.trim(), date };
+    if (editing) ctx.updateTransaction(initial.id, data); else ctx.addTransaction(data);
+    onClose();
+  }
+  if (ctx.accounts.length === 0) {
+    return (
+      <Modal onClose={onClose} title="Add transaction">
+        <p style={{ color: MUTED, fontSize: 13 }}>You need at least one account first.</p>
+        <button onClick={() => { onClose(); ctx.openAccountForm(); }} className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', width: '100%', fontWeight: 500, marginTop: 10 }}>Add an account</button>
+      </Modal>
+    );
+  }
+  return (
+    <Modal onClose={onClose} title={editing ? 'Edit transaction' : 'Add transaction'}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <TypeToggle value={type} onChange={(v) => { setType(v); setCategoryId(''); }} option="expense" label="Expense" color={RUST} />
+          <TypeToggle value={type} onChange={(v) => { setType(v); setCategoryId(''); }} option="income" label="Income" color={TEAL} />
+          {!editing && ctx.accounts.length > 1 && <TypeToggle value={type} onChange={(v) => { setType(v); setCategoryId(''); }} option="transfer" label="Transfer" color={AMBER} />}
+        </div>
+        {isTransfer && <label style={{ fontSize: 11, color: MUTED, marginBottom: -8 }}>From</label>}
+        <select className="lw-select" value={accountId} onChange={(e) => { setAccountId(e.target.value); if (e.target.value === toId) setToId(''); }}>
+          {ctx.accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+        </select>
+        {isTransfer && (
+          <React.Fragment>
+            <label style={{ fontSize: 11, color: MUTED, marginBottom: -8 }}>To</label>
+            <select className="lw-select" value={toId} onChange={(e) => setToId(e.target.value)} required>
+              <option value="">Choose an account</option>
+              {transferTargets.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+            </select>
+          </React.Fragment>
+        )}
+        <input className="lw-input" type="number" step="0.01" min="0" placeholder={isTransfer && from ? 'Amount to move (' + from.currency + ')' : 'Amount'} value={amount} onChange={(e) => setAmount(e.target.value)} required />
+        {converted != null && <p style={{ fontSize: 11, color: MUTED, margin: -6 + 'px 0 0' }}>Arrives as {to.currency} {fmt(converted)} in {to.name}.</p>}
+        {isTransfer ? (
+          <p style={{ fontSize: 11, color: MUTED, margin: 0 }}>A transfer moves your own money between accounts, so it is left out of income and spending totals.</p>
+        ) : (
+          <React.Fragment>
+            <select className="lw-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} required>
+              <option value="">Select category</option>
+              {filteredCats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <QuickAddCategory ctx={ctx} type={type} onAdd={setCategoryId} />
+          </React.Fragment>
+        )}
+        <input className="lw-input" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
+        <input className="lw-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>{editing ? 'Update transaction' : (isTransfer ? 'Move the money' : 'Save transaction')}</button>
+      </form>
+    </Modal>
+  );
+}
+function GoalModal({ ctx, onClose, initial }) {
+  const editing = !!initial;
+  const [name, setName] = useState((initial && initial.name) || '');
+  const [categoryIds, setCategoryIds] = useState((initial && initial.categoryIds) || []);
+  const [period, setPeriod] = useState((initial && initial.period) || 'monthly');
+  const [customDays, setCustomDays] = useState((initial && initial.customDays) || 30);
+  const [limit, setLimit] = useState(initial ? String(initial.limit) : '');
+  const [alertPct, setAlertPct] = useState((initial && initial.alertPct) || 80);
+  const [rolloverMode, setRolloverMode] = useState((initial && initial.rolloverMode) || 'carry');
+  const [savingsAccountId, setSavingsAccountId] = useState((initial && initial.savingsAccountId) || '');
+  const expenseCats = ctx.categories.filter((c) => c.type === 'expense');
+  function toggle(id) { setCategoryIds((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]); }
+  function submit(e) {
+    e.preventDefault();
+    const lim = parseFloat(limit);
+    if (!name.trim() || !lim || lim <= 0 || categoryIds.length === 0) return;
+    const data = { name: name.trim(), categoryIds, period, customDays: Number(customDays), limit: lim, alertPct: Number(alertPct), rolloverMode, savingsAccountId: rolloverMode === 'sweep' ? savingsAccountId : '' };
+    if (editing) ctx.saveGoal({ ...initial, ...data }); else ctx.saveGoal(data);
+    onClose();
+  }
+  return (
+    <Modal onClose={onClose} title={editing ? 'Edit budget goal' : 'Set a budget goal'} wide>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <input className="lw-input" placeholder="Goal name (e.g. Home expenses)" value={name} onChange={(e) => setName(e.target.value)} required />
+        <div>
+          <p style={{ fontSize: 12, color: MUTED, margin: '0 0 6px' }}>Categories included</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 6 }}>
+            {expenseCats.map((c) => (
+              <button type="button" key={c.id} onClick={() => toggle(c.id)} className="lw-btn" style={{
+                background: categoryIds.includes(c.id) ? TEAL : SURFACE_2, color: categoryIds.includes(c.id) ? INK : PAPER,
+                border: '1px solid ' + (categoryIds.includes(c.id) ? TEAL : DIVIDER), borderRadius: 20, padding: '5px 12px', fontSize: 12,
+              }}>{c.name}</button>
+            ))}
+          </div>
+          <QuickAddCategory ctx={ctx} type="expense" onAdd={(id) => setCategoryIds((prev) => [...prev, id])} />
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <select className="lw-select" value={period} onChange={(e) => setPeriod(e.target.value)}>
+            <option value="monthly">Monthly</option><option value="weekly">Weekly</option><option value="custom">Custom period</option>
+          </select>
+          {period === 'custom' && <input className="lw-input" type="number" min="1" placeholder="Days" value={customDays} onChange={(e) => setCustomDays(e.target.value)} style={{ width: 90 }} />}
+        </div>
+        <input className="lw-input" type="number" step="0.01" min="0" placeholder={'Limit (' + ctx.displayCurrency + ')'} value={limit} onChange={(e) => setLimit(e.target.value)} required />
+        <div>
+          <p style={{ fontSize: 12, color: MUTED, margin: '0 0 6px' }}>Alert me at {alertPct}% of the limit</p>
+          <input type="range" min="50" max="100" value={alertPct} onChange={(e) => setAlertPct(e.target.value)} style={{ width: '100%' }} />
+        </div>
+        {period === 'monthly' && (
+          <div>
+            <p style={{ fontSize: 12, color: MUTED, margin: '0 0 6px' }}>When the month ends, unused budget should…</p>
+            <select className="lw-select" value={rolloverMode} onChange={(e) => setRolloverMode(e.target.value)}>
+              <option value="carry">Roll over into next month's goal</option>
+              <option value="sweep">Move to a savings account</option>
+              <option value="reset">Reset to zero (don't carry over)</option>
+            </select>
+            {rolloverMode === 'sweep' && (
+              <select className="lw-select" value={savingsAccountId} onChange={(e) => setSavingsAccountId(e.target.value)} style={{ marginTop: 8 }} required>
+                <option value="">Choose savings account</option>
+                {ctx.accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            )}
+          </div>
+        )}
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>{editing ? 'Update goal' : 'Save goal'}</button>
+      </form>
+    </Modal>
+  );
+}
+function AccountModal({ ctx, onClose, initial }) {
+  const editing = !!initial;
+  const [name, setName] = useState((initial && initial.name) || '');
+  const [type, setType] = useState((initial && initial.type) || 'cash');
+  const [currency, setCurrency] = useState((initial && initial.currency) || ctx.displayCurrency);
+  const [opening, setOpening] = useState(initial ? String(initial.opening) : '0');
+  const [sweepEnabled, setSweepEnabled] = useState(!!(initial && initial.sweepEnabled));
+  const [sweepTargetId, setSweepTargetId] = useState((initial && initial.sweepTargetId) || '');
+  const targets = ctx.accounts.filter((a) => !initial || a.id !== initial.id);
+  function submit(e) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    const sweepOn = sweepEnabled && !!sweepTargetId;
+    const data = { name: name.trim(), type, currency, opening: parseFloat(opening) || 0, sweepEnabled: sweepOn, sweepTargetId: sweepOn ? sweepTargetId : '' };
+    ctx.saveAccount(editing ? { ...initial, ...data } : data);
+    onClose();
+  }
+  return (
+    <Modal onClose={onClose} title={editing ? 'Edit account' : 'Add account'}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <input className="lw-input" placeholder="Account name (e.g. HBL Checking)" value={name} onChange={(e) => setName(e.target.value)} required />
+        <select className="lw-select" value={type} onChange={(e) => setType(e.target.value)}>{ACCOUNT_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}</select>
+        <select className="lw-select" value={currency} onChange={(e) => setCurrency(e.target.value)}>{CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+        <input className="lw-input" type="number" step="0.01" placeholder="Opening balance" value={opening} onChange={(e) => setOpening(e.target.value)} />
+        <div style={{ borderTop: '1px solid ' + DIVIDER, paddingTop: 12 }}>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+            <input type="checkbox" checked={sweepEnabled} onChange={(e) => setSweepEnabled(e.target.checked)} style={{ marginTop: 3 }} />
+            <span>Reset monthly
+              <span style={{ display: 'block', color: MUTED, fontSize: 11, marginTop: 2 }}>On the 1st, whatever is left here moves into savings and this account starts the new month at 0.</span>
+            </span>
+          </label>
+          {sweepEnabled && (targets.length === 0 ? (
+            <p style={{ color: AMBER, fontSize: 12, margin: '8px 0 0' }}>Add a savings account first — there is nowhere to move the money yet.</p>
+          ) : (
+            <select className="lw-select" value={sweepTargetId} onChange={(e) => setSweepTargetId(e.target.value)} style={{ marginTop: 8 }} required>
+              <option value="">Move what is left into…</option>
+              {targets.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+            </select>
+          ))}
+        </div>
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>{editing ? 'Update account' : 'Save account'}</button>
+      </form>
+    </Modal>
+  );
+}
+function BillModal({ ctx, onClose, initial }) {
+  const editing = !!initial;
+  const [name, setName] = useState((initial && initial.name) || '');
+  const [type, setType] = useState((initial && initial.type) || 'expense');
+  const [amount, setAmount] = useState(initial ? String(initial.amount) : '');
+  const [accountId, setAccountId] = useState((initial && initial.accountId) || (ctx.accounts[0] && ctx.accounts[0].id) || '');
+  const [categoryId, setCategoryId] = useState((initial && initial.categoryId) || '');
+  const [frequency, setFrequency] = useState((initial && initial.frequency) || 'monthly');
+  const [nextDate, setNextDate] = useState((initial && initial.nextDate) || todayStr());
+  const filteredCats = ctx.categories.filter((c) => c.type === type);
+  function submit(e) {
+    e.preventDefault();
+    const amt = parseFloat(amount);
+    if (!name.trim() || !amt || amt <= 0 || !accountId || !categoryId) return;
+    const data = { name: name.trim(), type, amount: amt, accountId, categoryId, frequency, nextDate };
+    ctx.saveBill(editing ? { ...initial, ...data } : data);
+    onClose();
+  }
+  return (
+    <Modal onClose={onClose} title={editing ? 'Edit planned bill' : 'Add planned bill'}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <input className="lw-input" placeholder="Bill name (e.g. Rent, Netflix)" value={name} onChange={(e) => setName(e.target.value)} required />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <TypeToggle value={type} onChange={(v) => { setType(v); setCategoryId(''); }} option="expense" label="Expense" color={RUST} />
+          <TypeToggle value={type} onChange={(v) => { setType(v); setCategoryId(''); }} option="income" label="Income" color={TEAL} />
+        </div>
+        <select className="lw-select" value={accountId} onChange={(e) => setAccountId(e.target.value)}>{ctx.accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}</select>
+        <input className="lw-input" type="number" step="0.01" min="0" placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+        <select className="lw-select" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} required>
+          <option value="">Select category</option>
+          {filteredCats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <QuickAddCategory ctx={ctx} type={type} onAdd={setCategoryId} />
+        <select className="lw-select" value={frequency} onChange={(e) => setFrequency(e.target.value)}>
+          <option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="yearly">Yearly</option>
+        </select>
+        <input className="lw-input" type="date" value={nextDate} onChange={(e) => setNextDate(e.target.value)} />
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>{editing ? 'Update bill' : 'Save bill'}</button>
+      </form>
+    </Modal>
+  );
+}
+function AssetModal({ ctx, onClose, initial }) {
+  const editing = !!initial;
+  const [name, setName] = useState((initial && initial.name) || '');
+  const [type, setType] = useState((initial && initial.type) || 'stock');
+  const [value, setValue] = useState(initial ? String(initial.value) : '');
+  const [currency, setCurrency] = useState((initial && initial.currency) || ctx.displayCurrency);
+  function submit(e) {
+    e.preventDefault();
+    const v = parseFloat(value);
+    if (!name.trim() || !v || v < 0) return;
+    const data = { name: name.trim(), type, value: v, currency };
+    ctx.saveAsset(editing ? { ...initial, ...data } : data);
+    onClose();
+  }
+  return (
+    <Modal onClose={onClose} title={editing ? 'Edit asset' : 'Add asset'}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <input className="lw-input" placeholder="Name (e.g. AAPL shares, Bitcoin)" value={name} onChange={(e) => setName(e.target.value)} required />
+        <select className="lw-select" value={type} onChange={(e) => setType(e.target.value)}>{ASSET_TYPES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}</select>
+        <input className="lw-input" type="number" step="0.01" min="0" placeholder="Current value" value={value} onChange={(e) => setValue(e.target.value)} required />
+        <select className="lw-select" value={currency} onChange={(e) => setCurrency(e.target.value)}>{CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+        <p style={{ fontSize: 11, color: MUTED, margin: 0 }}>Update this value by hand whenever you check its price — there's no live market feed here.</p>
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>{editing ? 'Update asset' : 'Save asset'}</button>
+      </form>
+    </Modal>
+  );
+}
+function CategoryModal({ ctx, onClose, initial }) {
+  const editing = !!initial;
+  const [name, setName] = useState((initial && initial.name) || '');
+  const [type, setType] = useState((initial && initial.type) || 'expense');
+  function submit(e) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    ctx.saveCategory(editing ? { ...initial, name: name.trim(), type } : { name: name.trim(), type });
+    onClose();
+  }
+  return (
+    <Modal onClose={onClose} title={editing ? 'Edit category' : 'Add category'}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <input className="lw-input" placeholder="Category name" value={name} onChange={(e) => setName(e.target.value)} required />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <TypeToggle value={type} onChange={setType} option="expense" label="Expense" color={RUST} />
+          <TypeToggle value={type} onChange={setType} option="income" label="Income" color={TEAL} />
+        </div>
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>Save category</button>
+      </form>
+    </Modal>
+  );
+}
+
+function LoanRow({ loan, ctx }) {
+  const remaining = ctx.loanRemaining(loan);
+  const paid = (loan.repayments || []).reduce((s, r) => s + r.amount, 0);
+  const pct = loan.principal > 0 ? Math.min(100, (paid / loan.principal) * 100) : 0;
+  const overdue = loan.dueDate && loan.dueDate < todayStr() && remaining > 0;
+  const color = loan.direction === 'owed' ? TEAL : RUST;
+  const [showHistory, setShowHistory] = useState(false);
+  return (
+    <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '12px 14px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Badge name={loan.person} color={color} />
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 500 }}>{loan.person}</div>
+              <div style={{ fontSize: 11, color: overdue ? RUST : MUTED }}>
+                {loan.dueDate ? (overdue ? 'Overdue since ' + loan.dueDate : 'Due ' + loan.dueDate) : 'No due date'}
+                {loan.note ? ' · ' + loan.note : ''}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 16, color }}>{loan.currency} {fmt(remaining)}</span>
+          <button onClick={() => ctx.openLoanForm(loan)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.pencil} size={13} /></button>
+          <button onClick={() => ctx.deleteLoan(loan.id)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.trash} size={14} /></button>
+        </div>
+      </div>
+      <div style={{ height: 6, borderRadius: 3, background: DIVIDER, overflow: 'hidden', marginTop: 10 }}>
+        <div style={{ height: '100%', width: pct + '%', background: color, borderRadius: 3 }} />
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4, fontSize: 11, color: MUTED }}>
+        <span>Paid back {loan.currency} {fmt(paid)}</span>
+        <span>of {loan.currency} {fmt(loan.principal)}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+        {remaining > 0 && (
+          <button onClick={() => ctx.openRepayForm(loan)} className="lw-btn" style={{ background: color, color: INK, borderRadius: 6, padding: '6px 12px', fontSize: 12, fontWeight: 500 }}>
+            {loan.direction === 'owed' ? 'Log a repayment received' : 'Log a repayment made'}
+          </button>
+        )}
+        {(loan.repayments || []).length > 0 && (
+          <button onClick={() => setShowHistory((v) => !v)} className="lw-btn" style={{ background: 'transparent', color: MUTED, fontSize: 12, border: 'none' }}>
+            {showHistory ? 'Hide history' : 'Show history (' + loan.repayments.length + ')'}
+          </button>
+        )}
+      </div>
+      {showHistory && (
+        <div style={{ marginTop: 8, borderTop: '1px solid ' + DIVIDER, paddingTop: 8, display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {(loan.repayments || []).map((r) => (
+            <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: MUTED }}>
+              <span>{r.date}{r.note ? ' · ' + r.note : ''}</span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {loan.currency} {fmt(r.amount)}
+                <button onClick={() => ctx.deleteRepayment(loan.id, r.id)} className="lw-btn" style={{ background: 'transparent', color: MUTED }}><Icon path={P.x} size={11} /></button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LoansTab({ ctx }) {
+  const owed = ctx.loans.filter((l) => l.direction === 'owed');
+  const owe = ctx.loans.filter((l) => l.direction === 'owe');
+  const totalOwed = owed.reduce((s, l) => s + ctx.convert(ctx.loanRemaining(l), l.currency), 0);
+  const totalOwe = owe.reduce((s, l) => s + ctx.convert(ctx.loanRemaining(l), l.currency), 0);
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 20, flexWrap: 'wrap' }}>
+        <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '12px 16px', flex: 1, minWidth: 160 }}>
+          <p style={{ fontSize: 11, color: MUTED, margin: 0, textTransform: 'uppercase', letterSpacing: 1 }}>You'll receive</p>
+          <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, color: TEAL, margin: '4px 0 0' }}>{ctx.displayCurrency} {fmt(totalOwed)}</p>
+        </div>
+        <div style={{ background: SURFACE, border: '1px solid ' + DIVIDER, borderRadius: 8, padding: '12px 16px', flex: 1, minWidth: 160 }}>
+          <p style={{ fontSize: 11, color: MUTED, margin: 0, textTransform: 'uppercase', letterSpacing: 1 }}>You owe</p>
+          <p style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 22, color: RUST, margin: '4px 0 0' }}>{ctx.displayCurrency} {fmt(totalOwe)}</p>
+        </div>
+      </div>
+
+      <SectionHeader title="Money to receive" action="+ Add loan given" onAction={() => ctx.openLoanForm({ direction: 'owed' })} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 24 }}>
+        {owed.length === 0 && <p style={{ color: MUTED, fontSize: 13 }}>Nothing you've lent out is tracked yet.</p>}
+        {owed.map((l) => <LoanRow key={l.id} loan={l} ctx={ctx} />)}
+      </div>
+
+      <SectionHeader title="Money you owe" action="+ Add loan taken" onAction={() => ctx.openLoanForm({ direction: 'owe' })} />
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {owe.length === 0 && <p style={{ color: MUTED, fontSize: 13 }}>Nothing you've borrowed is tracked yet.</p>}
+        {owe.map((l) => <LoanRow key={l.id} loan={l} ctx={ctx} />)}
+      </div>
+    </div>
+  );
+}
+
+function LoanModal({ ctx, onClose, initial }) {
+  const editing = !!(initial && initial.id);
+  const direction = (initial && initial.direction) || 'owed';
+  const [person, setPerson] = useState((initial && initial.person) || '');
+  const [principal, setPrincipal] = useState(initial && initial.principal != null ? String(initial.principal) : '');
+  const [currency, setCurrency] = useState((initial && initial.currency) || ctx.displayCurrency);
+  const [date, setDate] = useState((initial && initial.date) || todayStr());
+  const [dueDate, setDueDate] = useState((initial && initial.dueDate) || '');
+  const [note, setNote] = useState((initial && initial.note) || '');
+  function submit(e) {
+    e.preventDefault();
+    const p = parseFloat(principal);
+    if (!person.trim() || !p || p <= 0) return;
+    const data = { direction, person: person.trim(), principal: p, currency, date, dueDate, note: note.trim() };
+    ctx.saveLoan(editing ? { ...initial, ...data } : data);
+    onClose();
+  }
+  return (
+    <Modal onClose={onClose} title={editing ? 'Edit loan' : direction === 'owed' ? 'Add loan you gave' : 'Add loan you took'}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <p style={{ fontSize: 12, color: MUTED, margin: 0 }}>
+          {direction === 'owed' ? 'You lent money — they owe you.' : 'You borrowed money — you owe them.'}
+        </p>
+        <input className="lw-input" placeholder="Person's name" value={person} onChange={(e) => setPerson(e.target.value)} required />
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input className="lw-input" type="number" step="0.01" min="0" placeholder="Amount" value={principal} onChange={(e) => setPrincipal(e.target.value)} required style={{ flex: 1 }} />
+          <select className="lw-select" value={currency} onChange={(e) => setCurrency(e.target.value)} style={{ width: 90 }}>{CURRENCIES.map((c) => <option key={c} value={c}>{c}</option>)}</select>
+        </div>
+        <div>
+          <p style={{ fontSize: 11, color: MUTED, margin: '0 0 4px' }}>Date</p>
+          <input className="lw-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </div>
+        <div>
+          <p style={{ fontSize: 11, color: MUTED, margin: '0 0 4px' }}>Due date (optional)</p>
+          <input className="lw-input" type="date" value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        </div>
+        <input className="lw-input" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>{editing ? 'Update loan' : 'Save loan'}</button>
+      </form>
+    </Modal>
+  );
+}
+
+function RepayModal({ ctx, onClose, loan }) {
+  const remaining = loan ? ctx.loanRemaining(loan) : 0;
+  const [amount, setAmount] = useState(remaining ? String(Math.round(remaining * 100) / 100) : '');
+  const [date, setDate] = useState(todayStr());
+  const [accountId, setAccountId] = useState((ctx.accounts[0] && ctx.accounts[0].id) || '');
+  const [note, setNote] = useState('');
+  if (!loan) return null;
+  function submit(e) {
+    e.preventDefault();
+    const amt = parseFloat(amount);
+    if (!amt || amt <= 0) return;
+    ctx.addRepayment(loan.id, { amount: amt, date, accountId, note: note.trim() });
+    onClose();
+  }
+  return (
+    <Modal onClose={onClose} title={(loan.direction === 'owed' ? 'Repayment from ' : 'Repayment to ') + loan.person}>
+      <form onSubmit={submit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <p style={{ fontSize: 12, color: MUTED, margin: 0 }}>Remaining: {loan.currency} {fmt(remaining)}</p>
+        <input className="lw-input" type="number" step="0.01" min="0" placeholder="Amount" value={amount} onChange={(e) => setAmount(e.target.value)} required />
+        <input className="lw-input" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+        <div>
+          <p style={{ fontSize: 11, color: MUTED, margin: '0 0 4px' }}>Account (optional — links this to your real balance)</p>
+          <select className="lw-select" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
+            <option value="">Don't record against an account</option>
+            {ctx.accounts.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+          </select>
+        </div>
+        <input className="lw-input" placeholder="Note (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
+        <button type="submit" className="lw-btn" style={{ background: TEAL, color: INK, borderRadius: 6, padding: '10px 0', fontWeight: 500 }}>Save repayment</button>
+      </form>
+    </Modal>
+  );
+}
+
+function WalletApp() {
+  const initial = loadData();
+  const [accounts, setAccounts] = useState((initial && initial.accounts) || [{ id: uid(), name: 'Cash', type: 'cash', currency: 'PKR', opening: 0 }]);
+  const [categories, setCategories] = useState((initial && initial.categories && initial.categories.length) ? initial.categories : DEFAULT_CATEGORIES);
+  const [transactions, setTransactions] = useState((initial && initial.transactions) || []);
+  const [budgets, setBudgets] = useState((initial && initial.budgets) || []);
+  const [recurring, setRecurring] = useState((initial && initial.recurring) || []);
+  const [assets, setAssets] = useState((initial && initial.assets) || []);
+  const [loans, setLoans] = useState((initial && initial.loans) || []);
+  const [displayCurrency, setDisplayCurrency] = useState((initial && initial.displayCurrency) || 'PKR');
+  const [rates, setRates] = useState((initial && initial.rates) || { PKR: 1 });
+  const [tab, setTab] = useState('dashboard');
+  const [sheetUrl, setSheetUrl] = useState(localStorage.getItem('ledger:sheetUrl') || '');
+  const [syncStatus, setSyncStatus] = useState('');
+  const [showTxnForm, setShowTxnForm] = useState(false);
+  const [showGoalForm, setShowGoalForm] = useState(false);
+  const [showAccountForm, setShowAccountForm] = useState(false);
+  const [showBillForm, setShowBillForm] = useState(false);
+  const [showAssetForm, setShowAssetForm] = useState(false);
+  const [showCategoryForm, setShowCategoryForm] = useState(false);
+  const [showLoanForm, setShowLoanForm] = useState(false);
+  const [showRepayForm, setShowRepayForm] = useState(false);
+  const [editingTxn, setEditingTxn] = useState(null);
+  const [editingGoal, setEditingGoal] = useState(null);
+  const [editingAccount, setEditingAccount] = useState(null);
+  const [editingBill, setEditingBill] = useState(null);
+  const [editingAsset, setEditingAsset] = useState(null);
+  const [editingCategory, setEditingCategory] = useState(null);
+  const [editingLoan, setEditingLoan] = useState(null);
+  const [repayingLoan, setRepayingLoan] = useState(null);
+
+  function openTxnForm(t) { setEditingTxn(t || null); setShowTxnForm(true); }
+  function openGoalForm(g) { setEditingGoal(g || null); setShowGoalForm(true); }
+  function openAccountForm(a) { setEditingAccount(a || null); setShowAccountForm(true); }
+  function openBillForm(b) { setEditingBill(b || null); setShowBillForm(true); }
+  function openAssetForm(a) { setEditingAsset(a || null); setShowAssetForm(true); }
+  function openCategoryForm(c) { setEditingCategory(c || null); setShowCategoryForm(true); }
+  function openLoanForm(l) { setEditingLoan(l || null); setShowLoanForm(true); }
+  function openRepayForm(l) { setRepayingLoan(l); setShowRepayForm(true); }
+
+  useEffect(() => {
+    saveData({ accounts, categories, transactions, budgets, recurring, assets, loans, displayCurrency, rates });
+  }, [accounts, categories, transactions, budgets, recurring, assets, loans, displayCurrency, rates]);
+
+  function convert(amount, currency) { const r = rates[currency] || 1; return amount / r; }
+  function accountById(id) { return accounts.find((a) => a.id === id); }
+  function categoryById(id) { return categories.find((c) => c.id === id); }
+  function balanceAsOf(acc, date, extraTxns) {
+    const all = (extraTxns && extraTxns.length) ? transactions.concat(extraTxns) : transactions;
+    const txnSum = all.filter((t) => t.accountId === acc.id && (!date || t.date <= date))
+      .reduce((s, t) => s + (t.type === 'income' ? t.amount : -t.amount), 0);
+    return (acc.opening || 0) + txnSum;
+  }
+  function accountBalance(acc) { return balanceAsOf(acc, null); }
+  function crossConvert(amount, from, to) {
+    if (from === to) return amount;
+    return convert(amount, from) * (rates[to] || 1);
+  }
+  function loanRemaining(loan) {
+    const repaid = (loan.repayments || []).reduce((s, r) => s + r.amount, 0);
+    return loan.principal - repaid;
+  }
+  const netWorth = useMemo(() => {
+    const accTotal = accounts.reduce((s, a) => s + convert(accountBalance(a), a.currency), 0);
+    const assetTotal = assets.reduce((s, a) => s + convert(a.value, a.currency), 0);
+    const loanTotal = loans.reduce((s, l) => {
+      const rem = convert(loanRemaining(l), l.currency || displayCurrency);
+      return s + (l.direction === 'owed' ? rem : -rem);
+    }, 0);
+    return accTotal + assetTotal + loanTotal;
+  }, [accounts, assets, loans, transactions, rates]);
+  const thisMonth = monthKey(todayStr());
+  const monthTxns = useMemo(() => transactions.filter((t) => monthKey(t.date) === thisMonth && !t.transfer), [transactions, thisMonth]);
+  const monthIncome = monthTxns.filter((t) => t.type === 'income').reduce((s, t) => { const acc = accountById(t.accountId); return s + convert(t.amount, acc ? acc.currency : displayCurrency); }, 0);
+  const monthExpense = monthTxns.filter((t) => t.type === 'expense').reduce((s, t) => { const acc = accountById(t.accountId); return s + convert(t.amount, acc ? acc.currency : displayCurrency); }, 0);
+  function spentInMonth(catIds, mk) {
+    const [start, end] = monthRange(mk);
+    return transactions.filter((t) => t.type === 'expense' && !t.transfer && t.date >= start && t.date <= end && catIds.includes(t.categoryId))
+      .reduce((s, t) => { const acc = accountById(t.accountId); return s + convert(t.amount, acc ? acc.currency : displayCurrency); }, 0);
+  }
+  const carryCache = {};
+  function carryEntering(goal, mk) {
+    const cacheKey = goal.id + ':' + mk;
+    if (carryCache[cacheKey] !== undefined) return carryCache[cacheKey];
+    let result;
+    const overrides = goal.carryOverrides || {};
+    if (overrides[mk] != null) { result = overrides[mk]; }
+    else if (goal.period !== 'monthly' || !goal.rolloverMode || goal.rolloverMode === 'none') { result = 0; }
+    else {
+      const created = goal.createdMonth || mk;
+      const pm = prevMonthKey(mk);
+      if (pm < created) { result = 0; }
+      else if (goal.rolloverMode === 'sweep' || goal.rolloverMode === 'reset') { result = 0; }
+      else {
+        const prevCarry = carryEntering(goal, pm);
+        const prevSpent = spentInMonth(goal.categoryIds, pm);
+        result = goal.limit + prevCarry - prevSpent;
+      }
+    }
+    carryCache[cacheKey] = result;
+    return result;
+  }
+  const budgetRows = useMemo(() => budgets.map((b) => {
+    if (b.period !== 'monthly') {
+      const start = periodStart(b.period, b.customDays);
+      const spent = transactions.filter((t) => t.type === 'expense' && !t.transfer && t.date >= start && b.categoryIds.includes(t.categoryId))
+        .reduce((s, t) => { const acc = accountById(t.accountId); return s + convert(t.amount, acc ? acc.currency : displayCurrency); }, 0);
+      const remaining = b.limit - spent;
+      const pct = Math.min(100, (spent / b.limit) * 100);
+      return Object.assign({}, b, { spent, remaining, pct, carry: 0, available: b.limit });
+    }
+    const carry = carryEntering(b, thisMonth);
+    const available = b.limit + carry;
+    const spent = spentInMonth(b.categoryIds, thisMonth);
+    const remaining = available - spent;
+    const pct = available > 0 ? Math.min(100, (spent / available) * 100) : 100;
+    return Object.assign({}, b, { spent, remaining, pct, carry, available });
+  }), [budgets, transactions, rates, displayCurrency, thisMonth]);
+  const sortedTxns = [...transactions].sort((a, b) => (a.date === b.date ? 0 : (a.date < b.date ? 1 : -1)));
+  const upcomingBills = [...recurring].sort((a, b) => (a.nextDate < b.nextDate ? -1 : 1));
+
+  function addTransaction(entry) { setTransactions((prev) => [{ ...entry, id: entry.id || uid() }, ...prev]); }
+  function updateTransaction(id, patch) { setTransactions((prev) => prev.map((t) => t.id === id ? { ...t, ...patch } : t)); }
+  function deleteTransaction(id) {
+    setTransactions((prev) => {
+      const t = prev.find((x) => x.id === id);
+      if (t && t.transferId) return prev.filter((x) => x.transferId !== t.transferId);
+      return prev.filter((x) => x.id !== id);
+    });
+  }
+  function saveAccount(acc) { setAccounts((prev) => { const idx = prev.findIndex((a) => a.id === acc.id); return idx >= 0 ? prev.map((a, i) => i === idx ? acc : a) : [...prev, { ...acc, id: uid() }]; }); }
+  function deleteAccount(id) { setAccounts((prev) => prev.filter((a) => a.id !== id)); }
+  function saveCategory(cat) { const id = cat.id || uid(); setCategories((prev) => { const idx = prev.findIndex((c) => c.id === id); return idx >= 0 ? prev.map((c, i) => i === idx ? { ...cat, id } : c) : [...prev, { ...cat, id }]; }); return id; }
+  function deleteCategory(id) { setCategories((prev) => prev.filter((c) => c.id !== id)); }
+  function saveGoal(goal) { setBudgets((prev) => { const idx = prev.findIndex((b) => b.id === goal.id); return idx >= 0 ? prev.map((b, i) => i === idx ? { ...prev[i], ...goal } : b) : [...prev, { ...goal, id: uid(), createdMonth: thisMonth, carryOverrides: {} }]; }); }
+  function setGoalCarryOverride(goalId, mk, value) {
+    setBudgets((prev) => prev.map((b) => b.id === goalId ? { ...b, carryOverrides: { ...(b.carryOverrides || {}), [mk]: value } } : b));
+  }
+  function deleteGoal(id) { setBudgets((prev) => prev.filter((b) => b.id !== id)); }
+  function saveBill(bill) { setRecurring((prev) => { const idx = prev.findIndex((r) => r.id === bill.id); return idx >= 0 ? prev.map((r, i) => i === idx ? bill : r) : [...prev, { ...bill, id: uid() }]; }); }
+  function deleteBill(id) { setRecurring((prev) => prev.filter((r) => r.id !== id)); }
+  function markBillPaid(bill) {
+    addTransaction({ type: bill.type, amount: bill.amount, accountId: bill.accountId, categoryId: bill.categoryId, note: bill.name, date: todayStr() });
+    saveBill({ ...bill, nextDate: advanceDate(bill.nextDate, bill.frequency) });
+  }
+
+  function transferPair(acc, target, amount, date, note, extra) {
+    const transferId = uid();
+    const inAmount = round2(crossConvert(amount, acc.currency, target.currency));
+    const base = { transfer: true, transferId, date };
+    return [
+      Object.assign({ id: uid(), type: 'expense', amount, accountId: acc.id, note: note ? note + ' → ' + target.name : 'to ' + target.name }, base, extra || {}),
+      Object.assign({ id: uid(), type: 'income', amount: inAmount, accountId: target.id, note: note ? note + ' ← ' + acc.name : 'from ' + acc.name }, base, extra || {}),
+    ];
+  }
+
+  function addTransfer({ fromId, toId, amount, note, date }) {
+    const from = accountById(fromId), to = accountById(toId);
+    if (!from || !to || from.id === to.id || !(amount > 0)) return;
+    const pair = transferPair(from, to, round2(amount), date || todayStr(), (note || '').trim());
+    setTransactions((prev) => [...pair, ...prev]);
+  }
+
+  function sweepAccounts() {
+    return accounts.filter((a) => a.sweepEnabled && a.sweepTargetId && a.sweepTargetId !== a.id);
+  }
+
+  // Empties every reset-monthly account into its savings account for the month that just ended.
+  // Dated the 1st of the following month, so the closed month's reports stay untouched and the
+  // new month opens at 0 with anything already logged in it left alone.
+  function buildMonthEndSweeps(endedMonth, generated) {
+    const date = nextMonthKey(endedMonth) + '-01';
+    const cutoff = monthEnd(endedMonth);
+    const out = [];
+    sweepAccounts().forEach((acc) => {
+      const target = accountById(acc.sweepTargetId);
+      if (!target || target.id === acc.id) return;
+      const done = transactions.concat(generated, out).some((t) => t.sweepMonth === endedMonth && t.sweepFrom === acc.id);
+      if (done) return;
+      const closing = round2(balanceAsOf(acc, cutoff, generated.concat(out)));
+      // If the app was opened late and money has already been spent from here since,
+      // never sweep more than is actually sitting in the account today.
+      const available = round2(balanceAsOf(acc, todayStr(), generated.concat(out)));
+      const balance = Math.min(closing, available);
+      if (balance <= 0) return;
+      out.push(...transferPair(acc, target, balance, date, 'Month-end sweep ' + endedMonth, { sweepMonth: endedMonth, sweepFrom: acc.id }));
+    });
+    return out;
+  }
+
+  function runSweepNow() {
+    const date = todayStr();
+    const out = [];
+    sweepAccounts().forEach((acc) => {
+      const target = accountById(acc.sweepTargetId);
+      if (!target || target.id === acc.id) return;
+      const balance = round2(balanceAsOf(acc, date, out));
+      if (balance <= 0) return;
+      out.push(...transferPair(acc, target, balance, date, 'Sweep to savings'));
+    });
+    if (out.length) setTransactions((prev) => [...out, ...prev]);
+    return out.length / 2;
+  }
+
+  const sweepRows = useMemo(() => sweepAccounts().map((acc) => {
+    const target = accountById(acc.sweepTargetId);
+    const balance = round2(balanceAsOf(acc, todayStr()));
+    return { acc, target, balance, display: convert(balance, acc.currency) };
+  }), [accounts, transactions, rates]);
+
+  const [lastProcessedMonth, setLastProcessedMonth] = useState(() => localStorage.getItem('ledger:lastProcessedMonth') || thisMonth);
+  useEffect(() => {
+    if (lastProcessedMonth >= thisMonth) return;
+    const newTxns = [];
+    let mk = lastProcessedMonth;
+    let guard = 0;
+    while (mk < thisMonth && guard++ < 240) {
+      budgets.forEach((b) => {
+        if (b.period === 'monthly' && b.rolloverMode === 'sweep' && b.savingsAccountId) {
+          const carry = carryEntering(b, mk);
+          const spent = spentInMonth(b.categoryIds, mk);
+          const remaining = b.limit + carry - spent;
+          if (remaining > 0) {
+            const incomeCat = categories.find((c) => c.type === 'income') || categories[0];
+            newTxns.push({ id: uid(), type: 'income', amount: remaining, accountId: b.savingsAccountId, categoryId: incomeCat ? incomeCat.id : undefined, note: 'Month-end sweep: ' + b.name, date: nextMonthKey(mk) + '-01' });
+          }
+        }
+      });
+      newTxns.push(...buildMonthEndSweeps(mk, newTxns));
+      mk = nextMonthKey(mk);
+    }
+    if (newTxns.length) setTransactions((prev) => [...newTxns, ...prev]);
+    setLastProcessedMonth(thisMonth);
+    localStorage.setItem('ledger:lastProcessedMonth', thisMonth);
+  }, [thisMonth]);
+  function saveAsset(asset) { setAssets((prev) => { const idx = prev.findIndex((a) => a.id === asset.id); return idx >= 0 ? prev.map((a, i) => i === idx ? asset : a) : [...prev, { ...asset, id: uid() }]; }); }
+  function deleteAsset(id) { setAssets((prev) => prev.filter((a) => a.id !== id)); }
+
+  function getOrCreateCategory(name, type) {
+    const existing = categories.find((c) => c.type === type && c.name.toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+    const id = uid();
+    setCategories((prev) => [...prev, { id, name, type }]);
+    return id;
+  }
+  function saveLoan(loan) { setLoans((prev) => { const idx = prev.findIndex((l) => l.id === loan.id); return idx >= 0 ? prev.map((l, i) => i === idx ? { ...l, ...loan } : l) : [...prev, { ...loan, id: uid(), repayments: [] }]; }); }
+  function deleteLoan(id) { setLoans((prev) => prev.filter((l) => l.id !== id)); setTransactions((prev) => prev.filter((t) => t.loanId !== id)); }
+  function addRepayment(loanId, repayment) {
+    const loan = loans.find((l) => l.id === loanId);
+    if (!loan) return;
+    const rep = { id: uid(), amount: repayment.amount, date: repayment.date, accountId: repayment.accountId || '', note: repayment.note || '' };
+    setLoans((prev) => prev.map((l) => l.id === loanId ? { ...l, repayments: [...(l.repayments || []), rep] } : l));
+    if (repayment.accountId) {
+      const catType = loan.direction === 'owed' ? 'income' : 'expense';
+      const catId = getOrCreateCategory('Loan repayment', catType);
+      addTransaction({
+        id: rep.id, type: catType, amount: repayment.amount, accountId: repayment.accountId, categoryId: catId,
+        note: (loan.direction === 'owed' ? 'Repayment from ' : 'Repayment to ') + loan.person, date: repayment.date, loanId,
+      });
+    }
+  }
+  function deleteRepayment(loanId, repaymentId) {
+    setLoans((prev) => prev.map((l) => l.id === loanId ? { ...l, repayments: (l.repayments || []).filter((r) => r.id !== repaymentId) } : l));
+    setTransactions((prev) => prev.filter((t) => t.id !== repaymentId));
+  }
+  function saveRate(currency, rate) { setRates((prev) => ({ ...prev, [currency]: rate })); }
+
+  function updateSheetUrl(url) { setSheetUrl(url); localStorage.setItem('ledger:sheetUrl', url); }
+
+  async function pushToSheet() {
+    if (!sheetUrl) { setSyncStatus('Add your sync URL first.'); return; }
+    setSyncStatus('Pushing…');
+    try {
+      const payload = JSON.stringify({ accounts, categories, transactions, budgets, recurring, assets, loans, displayCurrency, rates });
+      await fetch(sheetUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: payload });
+      setSyncStatus('Pushed just now — ' + new Date().toLocaleTimeString());
+    } catch (e) { setSyncStatus('Push failed: ' + e.message); }
+  }
+
+  async function pullFromSheet() {
+    if (!sheetUrl) { setSyncStatus('Add your sync URL first.'); return; }
+    setSyncStatus('Pulling…');
+    try {
+      const res = await fetch(sheetUrl);
+      const d = await res.json();
+      if (d && d.accounts) {
+        setAccounts(d.accounts || []);
+        setCategories((d.categories && d.categories.length) ? d.categories : DEFAULT_CATEGORIES);
+        setTransactions(d.transactions || []);
+        setBudgets(d.budgets || []);
+        setRecurring(d.recurring || []);
+        setAssets(d.assets || []);
+        setLoans(d.loans || []);
+        setDisplayCurrency(d.displayCurrency || 'PKR');
+        setRates(d.rates || { PKR: 1 });
+        setSyncStatus('Pulled just now — ' + new Date().toLocaleTimeString());
+      } else {
+        setSyncStatus('Sheet is empty — try Push first from this device.');
+      }
+    } catch (e) { setSyncStatus('Pull failed: ' + e.message); }
+  }
+
+  function exportCSV() {
+    const header = ['date', 'type', 'amount', 'account', 'category', 'note'];
+    const rows = transactions.map((t) => [t.date, t.type, t.amount, (accountById(t.accountId) || {}).name || '', (categoryById(t.categoryId) || {}).name || '', t.note || '']);
+    const csv = [header, ...rows].map((r) => r.map(csvEscape).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'ledger-transactions-' + todayStr() + '.csv'; a.click();
+    URL.revokeObjectURL(url);
+  }
+  function importCSV(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rows = parseCSV(String(reader.result));
+      const defaultAcc = accounts[0];
+      if (!defaultAcc) return;
+      let cats = [...categories];
+      const newTxns = [];
+      rows.forEach((row) => {
+        if (!row.date || !row.amount) return;
+        const type = String(row.type || 'expense').toLowerCase().indexOf('income') >= 0 ? 'income' : 'expense';
+        let cat = cats.find((c) => c.type === type && c.name.toLowerCase() === String(row.category || '').toLowerCase());
+        if (!cat) { cat = { id: uid(), name: row.category || 'Other', type }; cats.push(cat); }
+        const acc = accounts.find((a) => a.name.toLowerCase() === String(row.account || '').toLowerCase()) || defaultAcc;
+        newTxns.push({ id: uid(), type, amount: parseFloat(row.amount), accountId: acc.id, categoryId: cat.id, note: row.note || '', date: row.date });
+      });
+      setCategories(cats);
+      setTransactions((prev) => [...newTxns, ...prev]);
+    };
+    reader.readAsText(file);
+  }
+
+  const ctx = {
+    accounts, categories, transactions, budgets, recurring, assets, loans, displayCurrency, rates,
+    convert, accountById, categoryById, accountBalance, balanceAsOf, loanRemaining, netWorth, monthIncome, monthExpense, thisMonth,
+    sweepRows, runSweepNow, addTransfer, crossConvert,
+    budgetRows, sortedTxns, upcomingBills,
+    addTransaction, updateTransaction, deleteTransaction, saveAccount, deleteAccount, saveCategory, deleteCategory,
+    saveGoal, deleteGoal, setGoalCarryOverride, saveBill, deleteBill, markBillPaid, saveAsset, deleteAsset, saveRate,
+    saveLoan, deleteLoan, addRepayment, deleteRepayment,
+    exportCSV, importCSV,
+    sheetUrl, syncStatus, updateSheetUrl, pullFromSheet, pushToSheet,
+    setShowTxnForm, setShowGoalForm, setShowAccountForm, setShowBillForm, setShowAssetForm, setShowCategoryForm,
+    editingTxn, editingGoal, editingAccount, editingBill, editingAsset, editingCategory, editingLoan, repayingLoan,
+    openTxnForm, openGoalForm, openAccountForm, openBillForm, openAssetForm, openCategoryForm, openLoanForm, openRepayForm,
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', background: INK, color: PAPER, fontFamily: "'IBM Plex Sans', sans-serif" }}>
+      <div style={{ maxWidth: 780, margin: '0 auto', padding: '28px 18px 90px' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 18, flexWrap: 'wrap', gap: 10 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Icon path={P.wallet} size={20} color={TEAL} />
+              <h1 style={{ fontFamily: "'Fraunces', serif", fontWeight: 600, fontSize: 26, margin: 0 }}>Ledger</h1>
+            </div>
+            <p style={{ color: MUTED, fontSize: 13, margin: '4px 0 0 28px' }}>{monthLabel(thisMonth)} · net worth {displayCurrency} {fmt(netWorth)}</p>
+          </div>
+        </div>
+        <div className="lw-tab" style={{ display: 'flex', gap: 6, marginBottom: 22, overflowX: 'auto' }}>
+          {['dashboard', 'transactions', 'budgets', 'bills', 'loans', 'reports', 'accounts', 'sync'].map((t) => (
+            <button key={t} onClick={() => setTab(t)} className="lw-btn" style={{
+              background: tab === t ? SURFACE_2 : 'transparent', color: tab === t ? PAPER : MUTED,
+              border: '1px solid ' + (tab === t ? DIVIDER : 'transparent'), borderRadius: 6, padding: '6px 12px',
+              fontSize: 13, textTransform: 'capitalize', whiteSpace: 'nowrap',
+            }}>{t}</button>
+          ))}
+        </div>
+        {tab === 'dashboard' && <DashboardTab ctx={ctx} />}
+        {tab === 'transactions' && <TransactionsTab ctx={ctx} />}
+        {tab === 'budgets' && <BudgetsTab ctx={ctx} />}
+        {tab === 'bills' && <BillsTab ctx={ctx} />}
+        {tab === 'loans' && <LoansTab ctx={ctx} />}
+        {tab === 'reports' && <ReportsTab ctx={ctx} />}
+        {tab === 'accounts' && <AccountsTab ctx={ctx} />}
+        {tab === 'sync' && <SyncTab ctx={ctx} />}
+      </div>
+      {!showTxnForm && !showGoalForm && !showAccountForm && !showBillForm && !showAssetForm && !showCategoryForm && (
+        <button onClick={() => setShowTxnForm(true)} className="lw-btn" style={{
+          position: 'fixed', bottom: 24, right: 24, width: 52, height: 52, borderRadius: '50%',
+          background: TEAL, color: INK, display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
+        }} aria-label="Add transaction"><Icon path={P.plus} size={24} /></button>
+      )}
+      {showTxnForm && <TxnModal ctx={ctx} initial={editingTxn} onClose={() => { setShowTxnForm(false); setEditingTxn(null); }} />}
+      {showGoalForm && <GoalModal ctx={ctx} initial={editingGoal} onClose={() => { setShowGoalForm(false); setEditingGoal(null); }} />}
+      {showAccountForm && <AccountModal ctx={ctx} initial={editingAccount} onClose={() => { setShowAccountForm(false); setEditingAccount(null); }} />}
+      {showBillForm && <BillModal ctx={ctx} initial={editingBill} onClose={() => { setShowBillForm(false); setEditingBill(null); }} />}
+      {showAssetForm && <AssetModal ctx={ctx} initial={editingAsset} onClose={() => { setShowAssetForm(false); setEditingAsset(null); }} />}
+      {showCategoryForm && <CategoryModal ctx={ctx} initial={editingCategory} onClose={() => { setShowCategoryForm(false); setEditingCategory(null); }} />}
+      {showLoanForm && <LoanModal ctx={ctx} initial={editingLoan} onClose={() => { setShowLoanForm(false); setEditingLoan(null); }} />}
+      {showRepayForm && <RepayModal ctx={ctx} loan={repayingLoan} onClose={() => { setShowRepayForm(false); setRepayingLoan(null); }} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<WalletApp />);
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
+</script>
+</body>
+</html>
